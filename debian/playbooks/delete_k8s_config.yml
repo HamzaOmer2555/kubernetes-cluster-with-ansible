@@ -1,0 +1,145 @@
+# WARNING: This playbook performs destructive actions and will remove Kubernetes,
+# Docker, and Containerd along with their data. Use with caution.
+#
+- name: Full Kubernetes and Container Runtime Cleanup
+  hosts: all 
+  become: yes 
+  gather_facts: no
+
+  tasks:
+    - name: Reset Kubeadm
+      ansible.builtin.command: kubeadm reset --force
+      args:
+        warn: no
+      register: kubeadm_reset_status
+      ignore_errors: yes
+
+    - name: Remove Kubernetes configuration directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/dockershim
+        - /var/run/kubernetes 
+        - /etc/cni/net.d
+
+    - name: Remove etcd data directory
+      ansible.builtin.file:
+        path: /var/lib/etcd
+        state: absent
+      tags: [kubernetes, etcd, files]
+
+    - name: Delete CNI and Flannel network interfaces
+      ansible.builtin.command: "ip link delete {{ item }}"
+      args:
+        warn: no
+      loop:
+        - cni0
+        - flannel.1
+      ignore_errors: yes 
+      changed_when: false
+
+    - name: Delete Docker network interface
+      ansible.builtin.command: ip link delete docker0
+      args:
+        warn: no
+      ignore_errors: yes 
+      changed_when: false
+
+    - name: Making sure systemd-resolved is installed
+      ansible.builtin.apt:
+        name: systemd-resolved
+        state: present
+
+    - name: Restart systemd-resolved service
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+
+    - name: Purge Kubernetes packages
+      ansible.builtin.apt:
+        name:
+          - kubeadm
+          - kubelet
+          - kubectl
+        state: absent
+        purge: yes
+        allow_change_held_packages: yes 
+
+    - name: Autoremove unused packages
+      ansible.builtin.apt:
+        autoremove: yes
+
+    - name: Remove Kubernetes apt repository file
+      ansible.builtin.file:
+        path: /etc/apt/sources.list.d/kubernetes.list
+        state: absent
+
+    - name: Remove Kubernetes apt keyring
+      ansible.builtin.file:
+        path: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+        state: absent
+
+    - name: Find Kubernetes related log directories and files in /var/log
+      ansible.builtin.find:
+        paths: /var/log
+        patterns: "kube*" 
+        use_regex: no
+        file_type: any
+        hidden: yes
+      register: kube_logs_to_delete
+
+    - name: Remove Kubernetes related log directories and files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ kube_logs_to_delete.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: kube_logs_to_delete.files | length > 0
+
+    - name: Remove general pod and container log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/log/pods
+        - /var/log/containers
+
+    - name: Stop Docker service
+      ansible.builtin.systemd:
+        name: docker
+        state: stopped
+      ignore_errors: yes
+
+    - name: Remove Docker data directory
+      ansible.builtin.file:
+        path: /var/lib/docker
+        state: absent
+
+    - name: Stop containerd service
+      ansible.builtin.systemd:
+        name: containerd
+        state: stopped
+      ignore_errors: yes
+
+    - name: Purge containerd package
+      ansible.builtin.apt:
+        name: containerd.io 
+        state: absent
+        purge: yes
+
+    - name: Remove containerd data directory
+      ansible.builtin.file:
+        path: /var/lib/containerd
+        state: absent
+
+    - name: Final check - Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Display completion message
+      ansible.builtin.debug:
+        msg: "Kubernetes, Docker, and Containerd cleanup playbook execution finished."

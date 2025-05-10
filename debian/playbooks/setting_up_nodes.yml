@@ -1,0 +1,222 @@
+- name: Initial Kubernetes Cluster Setup - Kernel Modules
+  hosts: all 
+  become: yes 
+  gather_facts: yes
+
+  tasks:
+    - name: Load overlay kernel module
+      community.general.modprobe:
+        name: overlay
+        state: present 
+
+    - name: Load br_netfilter kernel module
+      community.general.modprobe:
+        name: br_netfilter
+        state: present 
+
+    - name: Ensure k8s.conf file exists for module loading on boot
+      ansible.builtin.file:
+        path: /etc/modules-load.d/k8s.conf
+        state: touch 
+        mode: '0644
+
+    - name: Add overlay to /etc/modules-load.d/k8s.conf
+      ansible.builtin.lineinfile:
+        path: /etc/modules-load.d/k8s.conf
+        line: "overlay"
+        create: yes 
+        state: present 
+
+    - name: Add br_netfilter to /etc/modules-load.d/k8s.conf
+      ansible.builtin.lineinfile:
+        path: /etc/modules-load.d/k8s.conf
+        line: "br_netfilter"
+        create: yes
+        state: present 
+
+    - name: Ensure k8s.conf file exists for sysctl settings
+      ansible.builtin.file:
+        path: /etc/sysctl.d/k8s.conf
+        state: touch # Creates the file if it doesn't exist
+        mode: '0644' # Sets appropriate permissions
+      tags: [sysctl, prerequisites, config]
+
+    - name: Set net.bridge.bridge-nf-call-ip6tables in /etc/sysctl.d/k8s.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/k8s.conf
+        line: "net.bridge.bridge-nf-call-ip6tables = 1"
+        create: yes # Creates the file if it doesn't exist (though the previous task handles this)
+        state: present # Ensures the line exists and is correct
+        regexp: "^net\\.bridge\\.bridge-nf-call-ip6tables\\s*=" # Matches the line to replace/update if it exists
+      notify: Apply sysctl changes # Handler to apply changes
+      tags: [sysctl, config, networking]
+
+    - name: Set net.bridge.bridge-nf-call-iptables in /etc/sysctl.d/k8s.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/k8s.conf
+        line: "net.bridge.bridge-nf-call-iptables = 1"
+        create: yes
+        state: present
+        regexp: "^net\\.bridge\\.bridge-nf-call-iptables\\s*="
+      notify: Apply sysctl changes
+      tags: [sysctl, config, networking]
+
+    - name: Set net.ipv4.ip_forward in /etc/sysctl.d/k8s.conf
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.d/k8s.conf
+        line: "net.ipv4.ip_forward = 1"
+        create: yes
+        state: present
+        regexp: "^net\\.ipv4\\.ip_forward\\s*="
+      notify: Apply sysctl changes
+      tags: [sysctl, config, networking]
+  
+   
+    - name: Install containerd
+      ansible.builtin.apt:
+        name: containerd.io # Common package name from Docker's apt repo. Adjust if using a different source/name.
+        state: present
+        update_cache: yes # Run apt-get update before installing
+      tags: [containerd, packages, prerequisites]
+
+    - name: Create /etc/containerd directory
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory # Ensures the path exists and is a directory
+        mode: '0755'
+      tags: [containerd, config, prerequisites]
+
+    - name: Generate default containerd configuration
+      ansible.builtin.shell: "containerd config default > /etc/containerd/config.toml"
+      args:
+        creates: /etc/containerd/config.toml # Only run if the config file doesn't exist
+        warn: no # Suppress warnings about using shell instead of a dedicated module for this specific case
+      changed_when: true # Assume this command always makes a change if it runs (because 'creates' handles idempotency)
+      tags: [containerd, config]
+      # Note: If you need to modify specific settings within config.toml later,
+      # consider using modules like ansible.builtin.lineinfile or community.general.ini_file.
+
+    - name: Ensure SystemdCgroup is true in containerd config
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        # This regexp looks for 'SystemdCgroup = false', captures the part before 'false' (including leading spaces and 'SystemdCgroup = ')
+        # and also captures any trailing comment on the same line.
+        regexp: '^(\s*SystemdCgroup\s*=\s*)false(\s*(#.*)?)$'
+        # Replaces 'false' with 'true', preserving the captured leading part and trailing comment.
+        replace: '\1true\2'
+        backup: yes # Creates a backup of the file before modification
+      notify: Restart containerd # Notify handler to restart containerd if this change is made
+      tags: [containerd, config]
+
+    - name: Ensure containerd service is enabled and running
+      ansible.builtin.systemd:
+        name: containerd
+        state: started # Ensures it's running. Will restart if needed and not already handled by "Restart containerd" handler.
+        enabled: yes   # Ensures it's enabled on boot.
+        daemon_reload: yes # Reload systemd daemon to pick up any unit file changes or to apply new configurations.
+      tags: [containerd, service]
+
+    # --- Kubernetes Apt Repository and Package Installation ---
+    - name: Install prerequisite packages for Kubernetes apt repository
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+        state: present
+        update_cache: yes
+      tags: [kubernetes, packages, prerequisites, apt]
+
+    - name: Ensure /etc/apt/keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+      tags: [kubernetes, apt, prerequisites]
+
+    - name: Download Kubernetes GPG key
+      ansible.builtin.shell: >
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key |
+        gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg # Makes the task idempotent
+        warn: no # Suppress warnings about using shell for this specific, common pattern
+      changed_when: not ansible_check_mode # Heuristic: if not in check mode and creates is false, it will run and change.
+      tags: [kubernetes, apt, prerequisites]
+
+    - name: Add Kubernetes apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /"
+        mode: '0644'
+      notify: Update apt cache # Notify handler to update apt cache after adding new repo
+      tags: [kubernetes, apt, config]
+
+    - name: Install Kubernetes packages (kubelet, kubeadm, kubectl)
+      ansible.builtin.apt:
+        name:
+          - kubelet # Specific versions can be added e.g., kubelet=1.30.0-00
+          - kubeadm
+          - kubectl
+        state: present
+        # update_cache: yes # Apt cache will be updated by a handler if the repo file changed
+      tags: [kubernetes, packages]
+
+    - name: Hold Kubernetes packages to prevent unintended upgrades
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+      tags: [kubernetes, packages, config]
+
+    # --- Verify Kubernetes Installation (Optional) ---
+    - name: Check kubeadm version
+      ansible.builtin.command: kubeadm version -o short
+      register: kubeadm_version_output
+      changed_when: false # This command doesn't change state
+      tags: [kubernetes, verification]
+
+    - name: Check kubectl client version
+      ansible.builtin.command: kubectl version --client -o short
+      register: kubectl_version_output
+      changed_when: false
+      tags: [kubernetes, verification]
+
+    - name: Check kubelet version
+      ansible.builtin.command: kubelet --version
+      register: kubelet_version_output
+      changed_when: false
+      tags: [kubernetes, verification]
+
+    - name: Display Kubernetes component versions
+      ansible.builtin.debug:
+        msg:
+          - "Kubeadm version: {{ kubeadm_version_output.stdout }}"
+          - "Kubectl client version: {{ kubectl_version_output.stdout }}"
+          - "Kubelet version: {{ kubelet_version_output.stdout }}"
+      tags: [kubernetes, verification, always]
+
+
+  handlers:
+    - name: Apply sysctl changes
+      ansible.builtin.command: sysctl --system
+      args:
+        warn: no # Suppress warnings about running generic commands
+      listen: "Apply sysctl changes" # This makes the handler listen to notifications
+      tags: [sysctl, system] # Added tags to handler as well for consistency
+
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+      listen: "Restart containerd" # This handler is triggered by tasks that notify "Restart containerd"
+      tags: [containerd, service]
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+      listen: "Update apt cache"
+      tags: [apt, system]

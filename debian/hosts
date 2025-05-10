@@ -1,0 +1,6 @@
+[kubernetes-master-nodes]
+kube-master-1
+
+[kubernetes-worker-nodes]
+kube-worker-1
+kube-worker-2

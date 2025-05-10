@@ -1,0 +1,58 @@
+# env_variables
+
+# Edit these values only as per your environment
+# Enter your master node advertise ip address and cidr range for the pods.
+ad_addr: 10.10.10.31 # Your master node's IP address
+cidr_v: 172.16.0.0/16 # Your chosen Pod Network CIDR (e.g., for Flannel)
+
+###################################################################################
+# Dont Edit these below values unless you know what you are doing.
+# These are common/mandatory components for a Kubernetes cluster setup.
+
+packages:
+# NOTE: Debian/Ubuntu use different package names for Docker CE/containerd.
+# Choose ONE of the options below based on your container runtime:
+# Option 1: containerd.io (Recommended minimal runtime for kubeadm)
+- containerd.io
+# Option 2: Docker CE (If you prefer Docker Engine)
+#- docker-ce
+#- docker-ce-cli
+#- docker-buildx-plugin # Often included in Docker CE install scripts
+- kubeadm
+- kubectl
+- kubelet
+
+services:
+# NOTE: Service names for container runtime and firewall.
+# Choose the container runtime service name based on your choice above:
+# Option 1: containerd service
+- containerd
+# Option 2: Docker service
+#- docker
+- kubelet
+- ufw # Changed from firewalld to ufw (Uncomplicated Firewall) - common on Debian/Ubuntu
+
+# NOTE: This list of ports is often incomplete for a full cluster setup.
+# Ensure all necessary ports for control plane and worker nodes are listed
+# as required by your chosen CNI and setup (refer to Kubernetes docs).
+ports:
+  # Common ports required by Kubernetes components
+  - "6443/tcp"  # Kubernetes API Server (Control Plane)
+  - "10250/tcp" # Kubelet API (Control Plane and Workers)
+  # Add other required ports as per your setup, e.g.:
+  #- "2379:2380/tcp" # etcd server client API (Control Plane)
+  #- "10259/tcp" # kube-scheduler (Control Plane)
+  #- "10257/tcp" # kube-controller-manager (Control Plane)
+  #- "30000:32767/tcp" # NodePort Services (Workers)
+
+
+# File name for storing the join token/output from kubeadm init
+token_file: join_token # Name of the file on the remote host/local control node
+
+
+# Kubernetes version to install (e.g., v1.29, v1.28)
+kubernetes_version: "1.30.12" # Make sure this matches the version you want and is compatible with the repo URL
+
+
+###################################################################################
+# Dont Edit these above values unless you know what you are doing.
